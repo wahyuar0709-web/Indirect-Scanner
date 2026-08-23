@@ -1,0 +1,841 @@
+// firestore.rules — RDI Indirect Scanner
+// Versi: v6.6 (Opsi 2 — Client-side Admin Account Management, tanpa Cloud Function)
+// Perubahan v6.6:
+//   /users/{userId}: allow write: if false (total) diganti allow create, update:
+//   if isAdmin() dengan validasi enum role/status + proteksi self-lockout (ADMIN
+//   tidak bisa demote role dirinya sendiri lewat jalur ini). Memungkinkan ADMIN
+//   bikin akun operator baru dari dalam app (via secondary Firebase App instance
+//   di app.html, lihat v6.58/v6.59 changelog app.html) TANPA perlu upgrade ke
+//   Blaze/Cloud Function. Sebelumnya satu-satunya jalur adalah manual di Firebase
+//   Console. allow delete tetap if false — nonaktifkan akun via status INACTIVE,
+//   bukan hard delete (konsisten dengan pola items/categories/vendors/racks).
+// Versi: v6.5 (Phase 6-F.3 — Migration Row Initial State Hardening, 17 Agustus 2026)
+// Perubahan v6.5 (Phase 6-F.3 — P1 FIX):
+//   migrationRows create — dulu importStatus boleh langsung diklaim 'IMPORTED'/
+//   'DUPLICATE'/'FAILED'/'BLOCKED' (final state) sejak baris pertama kali dibuat,
+//   dengan migRowTransactionIdValid() hanya memvalidasi BENTUK transactionId
+//   (string tidak kosong), bukan keasliannya — ADMIN direct Firestore write bisa
+//   membuat staging row yang sudah "sukses"/"gagal"/"duplikat" import dengan
+//   transactionId palsu tanpa pernah lewat migRunImport(). Ditutup: CREATE sekarang
+//   hanya boleh lahir sebagai importStatus == 'PENDING', ATAU 'BLOCKED' jika DAN
+//   HANYA JIKA validationStatus di payload yang sama == 'INVALID' (audit statis
+//   app.html mengonfirmasi migUploadBtn handler MEMANG menulis BLOCKED langsung
+//   saat create untuk baris gagal validasi — bukan cuma PENDING seperti asumsi
+//   awal; melarang BLOCKED total di CREATE akan mematahkan alur upload yang sah).
+//   transactionId == null && importedAt == null wajib di kedua state. Transisi ke
+//   state akhir (IMPORTED/DUPLICATE/FAILED) tetap HANYA lewat allow update (tidak
+//   diubah — sudah mensyaratkan resource.data.importStatus == 'PENDING' +
+//   migRowTransactionIdValid() sebelum mengizinkan transisi satu-kali).
+// Perubahan v6.4 (Phase 6-F.2 — lihat laporan audit untuk detail gap):
+//   §1/§5/§6/§9 — migrationTrxFieldsValid() sebelumnya TIDAK PERNAH membaca dokumen
+//   migrationRows/{migrationId}_{rowNumber} sama sekali — transaksi migrasi bisa
+//   klaim itemId/rackId/historicalKind/type/uom/sourceDate/sourceCreatedByRaw/
+//   sourceTransactionId APA PUN selama migrationId+sourceSystem valid, tanpa
+//   dicocokkan ke baris sumber sebenarnya (celah orphan A/C/E/F/G/H/I di laporan
+//   audit). Tambah migTxRowBindingValid(): get() migrationRows/{migrationId}_
+//   {rowNumber} (docId deterministik yang sudah ditegakkan di collection itu, jadi
+//   otomatis menutup celah B — rowNumber "nyasar" ke baris lain) lalu cocokkan
+//   payload transaksi 1:1 ke baris staging. uom/sourceDate/sourceCreatedByRaw
+//   dibandingkan lewat migRowSourceFieldMatches() supaya konsisten dengan pola
+//   nyata migRunImport() (`r.normalizedData.X || null` — string kosong dari CSV
+//   jadi null di transaksi, sedangkan migrationRows tetap simpan string asli
+//   termasuk string kosong) — TIDAK mewajibkan field itu terisi (tetap nullable).
+//   Kalau baris migrationRows-nya tidak ada sama sekali, get() gagal dan seluruh
+//   fungsi otomatis false (celah A).
+//   §4 — rowNumber di transaksi migrasi dan di migrationRows create sebelumnya
+//   cuma "is number && > 0" — 1.5/2.7 masih lolos (docId jadi "{migrationId}_1.5",
+//   melanggar invariant row identity integer). Tambah pengecekan
+//   rowNumber == int(rowNumber) di kedua tempat.
+// Perubahan v6.3 (Phase 6-F lanjutan — lihat laporan audit untuk detail bypass):
+//   §1 — Migration transaction Document ID sebelumnya TIDAK diikat ke identity
+//   sumbernya sama sekali (bisa ID acak apa pun). Tambah migTxIdFormatValid():
+//   menegakkan BENTUK id (prefix mig__, 3 segmen, hash-hex 8 karakter) — bukan
+//   pembuktian byte-exact ke migTxDocId() di app.html (tidak bisa direplikasi,
+//   Rules tidak punya regex-replace/hash custom). Lihat "Remaining limitations".
+//   §2 — migrationTrxFieldsValid(): dulu cuma exists() migrationBatches, TIDAK
+//   pernah cocokkan sourceSystem transaksi vs sourceSystem batch — transaksi bisa
+//   klaim sourceSystem palsu selama migrationId-nya valid. Tambah pencocokan.
+//   §4 — migBatchLegalTransition() cuma cek NAMA status (RECONCILING→COMPLETED
+//   selalu lolos secara struktur), TIDAK pernah cek reconciliationStatus == PASS/
+//   WARNING seperti disyaratkan Completion Gate. Tambah migCompletionGateValid().
+//   §5 — migrationRows create: rowNumber cuma dicek "is number", rowNumber <= 0
+//   masih lolos. Tambah rowNumber > 0.
+//   §8 — stockCorrections create: oldQty dulu murni klaim client, tidak pernah
+//   dicocokkan ke stockBalances.qty aktual saat itu (audit log bisa dipalsukan
+//   walau newQty sudah tervalidasi lewat stockCorrectionConsistent). Tambah
+//   pencocokan oldQty vs stockBalances.qty sekarang (atau 0 kalau dokumen belum ada).
+// Perubahan v6.2 (Phase 6-F):
+//   P0 — stockBalanceConsistent/stockByRackConsistent/stockCorrectionConsistent:
+//   existsAfter()/getAfter() saja tidak membuktikan transaksi/koreksi rujukan dibuat
+//   DI COMMIT YANG SAMA — celah replay/direct-write memungkinkan lastTransactionId
+//   (atau lastCorrectionId) lama dipakai ulang untuk menaikkan/menurunkan saldo tanpa
+//   transaksi baru (duplicate stock mutation). Fix: wajibkan tx.createdAt/corr.createdAt
+//   == request.time (satu request.time untuk semua dokumen dalam satu runTransaction).
+//   P1 — /users/{userId}: read sebelumnya isSignedIn() (VIEWER bisa baca role &
+//   identitas SEMUA user langsung dari Firestore). Dipersempit ke milik sendiri atau ADMIN.
+//   P1 — migrationBatches update: sebelumnya cuma cek status baru anggota daftar sah,
+//   tanpa cek transisi dari status lama masuk akal (bisa "lompat" antar state
+//   non-terminal). Tambah migBatchLegalTransition() sesuai graf transisi nyata di app.html.
+//   P2 — migrationRows create: rowId sebelumnya bebas (komentar bilang deterministik
+//   {migrationId}_{rowNumber} tapi tidak ditegakkan Rules) — sekarang docId divalidasi,
+//   sama seperti pola stockByRacks, menutup celah baris duplikat per rowNumber.
+// Perubahan v6.1:
+//   (Roadmap Phase 7 — Master Data Governance) baseTrxFieldsValid(): vendorId
+//   (kalau diisi) sekarang wajib exists() + status == 'ACTIVE', sama seperti
+//   item & rak yang sudah ditegakkan sebelumnya. Berlaku untuk jalur transaksi
+//   normal DAN migration (Phase 6).
+//   (Final End-to-End Audit) items/categories/vendors/racks: tambah validasi
+//   enum status (sebelumnya tidak ada validasi field sama sekali di collection
+//   ini, hanya isAdmin()) — menutup celah "Direct Firestore bypass" yang jadi
+//   root cause bug rack status ACTIVE/INACTIVE/ARCHIVED (lihat statusToggleHtml
+//   di app.html).
+// Nama file TIDAK diberi versi/tanggal — "firestore.rules" adalah nama baku
+// yang dibaca oleh Firebase CLI (firebase deploy --only firestore:rules);
+// riwayat versi dilacak lewat komentar ini + Git/roadmap, bukan nama file.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function isAdmin() {
+      return isSignedIn() && userRole() == 'ADMIN';
+    }
+    function isWarehouse() {
+      return isSignedIn() && (userRole() == 'WAREHOUSE' || userRole() == 'ADMIN');
+    }
+    // v6.7 — Cleanup Mode: jendela waktu pendek (default 15 menit, ditegakkan lewat
+    // enabledUntil timestamp, BUKAN sekadar boolean) yang HARUS aktif dulu sebelum
+    // delete transactions/migrationRows atau tulis-langsung stockByRacks (jalur cleanup)
+    // diizinkan. Defaultnya TERTUTUP (dokumen belum ada / enabled:false) — jadi delete
+    // tetap tertutup permanen di luar jendela ini, ditegakkan di server (Rules), bukan
+    // cuma di app. PIN yang diminta app SEBELUM menyalakan flag ini murni pengaman
+    // klik-tidak-sengaja di UI (lihat komentar di app.html) — bukan pengganti proteksi
+    // ini; proteksi sungguhan adalah flag+isAdmin() yang dicek di sini.
+    function cleanupModeActive() {
+      return exists(/databases/$(database)/documents/systemFlags/cleanupMode) &&
+        get(/databases/$(database)/documents/systemFlags/cleanupMode).data.enabled == true &&
+        get(/databases/$(database)/documents/systemFlags/cleanupMode).data.enabledUntil > request.time;
+    }
+    // v6.8 — Factory Reset Mode: sama persis polanya dengan Cleanup Mode (jendela
+    // pendek, server-enforced, default tertutup), TAPI dipakai untuk operasi yang
+    // JAUH lebih luas: hapus SEMUA data kerja (items/categories/vendors/racks/
+    // transactions/stockBalances/stockByRacks/migrationRows/migrationBatches).
+    // Dipisah dari cleanupModeActive() secara sengaja supaya dua fitur ini TIDAK
+    // saling mengaktifkan satu sama lain secara tidak sengaja. stockCorrections
+    // dan migrationCleanupLog TETAP tidak bisa dihapus lewat flag ini — keduanya
+    // audit log permanen by design, tidak ikut kena reset.
+    function factoryResetModeActive() {
+      return exists(/databases/$(database)/documents/systemFlags/factoryResetMode) &&
+        get(/databases/$(database)/documents/systemFlags/factoryResetMode).data.enabled == true &&
+        get(/databases/$(database)/documents/systemFlags/factoryResetMode).data.enabledUntil > request.time;
+    }
+
+    // --- users ---
+    // Phase 6-F (Security Deep Audit) — P1 FIX: "isSignedIn()" mengizinkan SIAPA PUN
+    // yang login (termasuk VIEWER) membaca dokumen user LAIN secara langsung lewat
+    // Firestore (bukan cuma dirinya sendiri) — client (lihat app.html) cuma pernah
+    // getDoc(doc(db,'users',user.uid)) untuk dirinya sendiri, jadi tidak ada fitur
+    // legit yang butuh akses baca ke user lain selain ADMIN. Celah ini membocorkan
+    // role & identitas seluruh user ke akun VIEWER lewat direct Firestore call.
+    // Dipersempit: user boleh baca dokumennya sendiri, ADMIN boleh baca siapa saja.
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      // v6.58 (Opsi 2 — "Client-side Admin", tanpa Cloud Function/Blaze):
+      // Sebelumnya allow write: if false total — TIDAK ADA jalur resmi bikin
+      // akun operator baru dari dalam app, semua manual di Firebase Console.
+      // Dilonggarkan SEMPIT: hanya ADMIN yang boleh create/update dokumen user
+      // (termasuk milik sendiri), dengan validasi field wajib (pola sama seperti
+      // enum validation items/categories/vendors/racks di atas) supaya tidak
+      // bisa ditulis role/status sembarangan. Klausul terakhir mencegah ADMIN
+      // menurunkan role dirinya SENDIRI dari ADMIN lewat jalur ini (self-lockout
+      // protection) — kalau cuma ada 1 admin, salah klik bisa mengunci akses
+      // admin permanen tanpa Cloud Function untuk memperbaikinya.
+      allow create, update: if isAdmin()
+        && request.resource.data.role in ['ADMIN', 'WAREHOUSE', 'VIEWER']
+        && request.resource.data.name is string && request.resource.data.name.size() > 0
+        && (request.resource.data.status == null || request.resource.data.status in ['ACTIVE', 'INACTIVE'])
+        && (request.auth.uid != userId || request.resource.data.role == 'ADMIN');
+      allow delete: if false; // jangan hard delete akun, nonaktifkan via status INACTIVE
+    }
+
+    // --- items ---
+    // Final End-to-End Audit (17 Agustus 2026): sebelumnya tidak ada validasi
+    // field sama sekali di sini (cuma isAdmin()) — celah "Direct Firestore
+    // bypass": status bisa ditulis nilai sembarang (typo, string kosong, dst),
+    // yang lolos begitu saja lewat filter client (`!== 'ARCHIVED'`) karena
+    // client cuma cek NEGATIF (bukan whitelist POSITIF). Kasus nyata: bug rack
+    // yang baru diperbaiki (lihat statusToggleHtml di app.html) — root cause-nya
+    // persis karena tidak ada apa pun di Rules yang menolak status di luar
+    // ['ACTIVE','ARCHIVED']. Tambah validasi enum status minimal (bukan hasOnly
+    // penuh untuk semua field item — field item cukup banyak & sering berubah,
+    // whitelist ketat berisiko false-negative kalau lupa update Rules tiap ada
+    // field baru; enum status cukup untuk menutup celah yang sudah terbukti).
+    match /items/{itemId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin()
+        && (request.resource.data.status == null || request.resource.data.status in ['ACTIVE', 'ARCHIVED']);
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8 — hard delete normalnya dilarang (pakai ARCHIVED), kecuali Factory Reset
+    }
+
+    // --- categories, vendors, racks (pola sama) ---
+    // Sama seperti items di atas: enum status ditegakkan supaya tidak ada nilai
+    // liar yang lolos ke Firestore lalu bikin filter client "silently keep"
+    // data yang seharusnya nonaktif (root cause bug rack — lihat catatan di atas).
+    match /categories/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin()
+        && (request.resource.data.status == null || request.resource.data.status in ['ACTIVE', 'INACTIVE']);
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8
+    }
+    match /vendors/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin()
+        && (request.resource.data.status == null || request.resource.data.status in ['ACTIVE', 'INACTIVE']);
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8
+    }
+    match /racks/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin()
+        && (request.resource.data.status == null || request.resource.data.status in ['ACTIVE', 'ARCHIVED']);
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8
+    }
+
+    // --- transactions, stockBalances, stockByRacks (STEP 6) ---
+    // Keputusan: tetap Firebase Spark plan (gratis), tidak upgrade Blaze.
+    // Cloud Function tidak dipakai — client menulis langsung via runTransaction,
+    // atomicity dijamin oleh Firestore transaction API di sisi client.
+    // Sebagai gantinya, validasi diperketat di rules ini.
+    //
+    // P1-07: canonical transaction schema (field yang BENAR-BENAR dikirim client,
+    // lihat trxForm submit handler di app.html — payload sengaja normalized,
+    // TIDAK menyimpan itemCode/unit di sini supaya tidak bisa divergen dari
+    // Master Item; kalau butuh itemCode/unit, selalu lookup lewat itemId):
+    //   itemId        wajib, string, immutable (tidak pernah diedit — create-only)
+    //   type          wajib, 'MASUK' | 'KELUAR'
+    //   qty           wajib, number > 0
+    //   rackId        wajib-jika-KELUAR (string non-kosong), nullable kalau MASUK
+    //   vendorId      nullable, string kalau ada
+    //   noSjPo        nullable, string kalau ada
+    //   note          nullable, string kalau ada
+    //   createdAt     wajib, harus == request.time (server timestamp asli, bukan nilai kiriman client)
+    //   createdBy     wajib, harus == uid yang login
+    //   createdByName wajib, string
+    // Field DI LUAR daftar ini ditolak (hasOnly) — menutup celah client menyelipkan
+    // field arbitrary (mis. itemCode palsu) yang tidak tervalidasi.
+    // Shared validation core, dipakai baik oleh transaksi NORMAL (Step 6) maupun
+    // transaksi hasil CONTROLLED IMPORT (Roadmap Phase 6 — Historical Migration).
+    // Kedua jalur menegakkan invariant integritas yang SAMA (item ACTIVE, rak ACTIVE,
+    // KELUAR wajib rak, cross-document completeness) — migrasi TIDAK BOLEH jadi
+    // bypass Rules (Keputusan Strategis #8 di roadmap).
+    function baseTrxFieldsValid() {
+      return request.resource.data.qty is number
+        && request.resource.data.qty > 0
+        && request.resource.data.type in ['MASUK', 'KELUAR']
+        && request.resource.data.itemId is string
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdAt == request.time
+        && (request.resource.data.rackId == null || request.resource.data.rackId is string)
+        && (request.resource.data.vendorId == null || request.resource.data.vendorId is string)
+        && (request.resource.data.noSjPo == null || request.resource.data.noSjPo is string)
+        && (request.resource.data.note == null || request.resource.data.note is string)
+        // item harus ACTIVE — tanpa Cloud Function, ini satu-satunya penjamin
+        // di sisi server bahwa transaksi tidak dibuat untuk item ARCHIVED
+        // (client-side check di UI bisa di-bypass lewat direct Firestore call)
+        && get(/databases/$(database)/documents/items/$(request.resource.data.itemId)).data.status == 'ACTIVE'
+        // P0-02: KELUAR wajib punya rackId (string non-kosong), supaya stockByRacks
+        // tidak bisa divergen dari stockBalances. MASUK boleh tanpa rackId.
+        && (
+          request.resource.data.type == 'MASUK' ||
+          (request.resource.data.rackId is string && request.resource.data.rackId.size() > 0)
+        )
+        // Roadmap Phase 1.4 — Rack Reference Integrity: kalau rackId diisi (MASUK opsional,
+        // KELUAR wajib), rak itu harus benar-benar ada DAN berstatus ACTIVE. Rak yang sudah
+        // diarsipkan tidak boleh dipakai transaksi baru.
+        && (
+          request.resource.data.rackId == null ||
+          (
+            exists(/databases/$(database)/documents/racks/$(request.resource.data.rackId)) &&
+            get(/databases/$(database)/documents/racks/$(request.resource.data.rackId)).data.status == 'ACTIVE'
+          )
+        )
+        // Roadmap Phase 7 — Master Data Governance: kalau vendorId diisi, vendor itu
+        // harus benar-benar ada DAN berstatus ACTIVE. Sama seperti item/rak, ini berlaku
+        // untuk KEDUA jalur (normal + migration) supaya tidak ada bypass (Keputusan
+        // Strategis #7). vendorId sendiri tetap opsional (MASUK/KELUAR boleh tanpa vendor).
+        && (
+          request.resource.data.vendorId == null ||
+          (
+            exists(/databases/$(database)/documents/vendors/$(request.resource.data.vendorId)) &&
+            get(/databases/$(database)/documents/vendors/$(request.resource.data.vendorId)).data.status == 'ACTIVE'
+          )
+        )
+        // Roadmap Phase 1.3 — Cross-Document Completeness: tidak cukup stockBalances
+        // saja atau stockByRacks saja yang menyertai transaksi ini di commit yang
+        // sama — stockBalances WAJIB selalu ikut, dan kalau transaksi ini punya
+        // rackId, stockByRacks/{itemId}_{rackId} WAJIB juga ikut ditulis di commit
+        // yang sama. Kombinasi ini + validasi getAfter() di stockBalances/stockByRacks
+        // (yang memaksa angkanya cocok dengan transaksi ini) menutup celah partial
+        // mutation: transaction+stockBalances TANPA stockByRacks (atau sebaliknya)
+        // untuk transaksi yang seharusnya py rak, sekarang otomatis DENY.
+        && existsAfter(/databases/$(database)/documents/stockBalances/$(request.resource.data.itemId))
+        && (
+          request.resource.data.rackId == null ||
+          existsAfter(/databases/$(database)/documents/stockByRacks/$(request.resource.data.itemId + '_' + request.resource.data.rackId))
+        );
+    }
+    // Roadmap Phase 6.5 — Source Provenance: transaksi hasil migrasi WAJIB membawa
+    // jejak sumbernya (tidak boleh "menghilangkan ID sistem lama"), dan WAJIB
+    // menunjuk ke migrationBatches yang benar-benar ada (tidak bisa dikarang bebas).
+    function migrationTrxFieldsValid() {
+      return request.resource.data.sourceSystem is string && request.resource.data.sourceSystem.size() > 0
+        && request.resource.data.sourceTransactionId is string && request.resource.data.sourceTransactionId.size() > 0
+        && request.resource.data.migrationId is string && request.resource.data.migrationId.size() > 0
+        && request.resource.data.historicalKind in ['TRANSACTION', 'OPENING_BALANCE']
+        && exists(/databases/$(database)/documents/migrationBatches/$(request.resource.data.migrationId))
+        // Phase 6-F (§2) — P0 FIX: exists() saja membuktikan migrationId ADA, tapi
+        // tidak membuktikan sourceSystem transaksi ini benar-benar milik batch itu.
+        // Sebelumnya transaksi migrasi bisa klaim sourceSystem sembarang (mis. "SAP")
+        // selama migrationId menunjuk ke batch nyata (bisa dari sourceSystem lain,
+        // mis. "LEGACY_EXCEL") — lolos DENY karena tidak pernah dicocokkan. Ditutup:
+        // sourceSystem transaksi WAJIB sama persis dengan migrationBatches.sourceSystem.
+        && get(/databases/$(database)/documents/migrationBatches/$(request.resource.data.migrationId)).data.sourceSystem == request.resource.data.sourceSystem
+        // Phase 6-D — Idempotency Deep Audit: uom/sourceDate/sourceCreatedByRaw sekarang
+        // dipersist eksplisit (dulu hilang/nempel di note) supaya jadi bagian audit payload
+        // equality. Opsional (boleh null kalau CSV sumber tidak mengisinya), tapi kalau ada
+        // harus string — menutup celah menyelipkan tipe data lain lewat field ini.
+        && (request.resource.data.uom == null || request.resource.data.uom is string)
+        && (request.resource.data.sourceDate == null || request.resource.data.sourceDate is string)
+        && (request.resource.data.sourceCreatedByRaw == null || request.resource.data.sourceCreatedByRaw is string)
+        // Phase 6-E — Provenance Deep Audit: rowNumber wajib ada & bertipe number supaya
+        // trace "transaction → source" (Roadmap §9) langsung ke migrationRows/{migrationId}_{rowNumber}
+        // tanpa harus query balik lewat sourceTransactionId.
+        // Phase 6-F.2 (§4) — P0 FIX: dulu cuma "is number && > 0" — 1.5/2.7 masih lolos
+        // (docId jadi "{migrationId}_1.5", melanggar invariant row identity integer
+        // yang diasumsikan reconciliation L1-L6 & migTxRowBindingValid di bawah).
+        && request.resource.data.rowNumber is number && request.resource.data.rowNumber > 0
+        && request.resource.data.rowNumber == int(request.resource.data.rowNumber)
+        // Phase 6-F.2 (§1,§5,§6,§9) — P0 FIX: sebelumnya TIDAK ADA apa pun di sini yang
+        // mencocokkan payload transaksi migrasi ini ke baris staging migrationRows yang
+        // dirujuk (migrationId+rowNumber) — hanya migrationBatches yang dicek exists()+
+        // sourceSystem. Transaksi migrasi bisa klaim itemId/rackId/historicalKind/type/
+        // uom/sourceDate/sourceCreatedByRaw/sourceTransactionId APA PUN selama batch-nya
+        // valid (celah orphan A/C/E/F/G/H/I — lihat laporan audit Phase 6-F.2). Ditutup:
+        // wajib cocok 1:1 ke migrationRows/{migrationId}_{rowNumber}.
+        && migTxRowBindingValid();
+    }
+    // Phase 6-F.2 (§6) — uom/sourceDate/sourceCreatedByRaw TIDAK mandatory (nullable-by-
+    // design, sesuai instruksi audit) — TAPI kalau migrationRows.normalizedData.X berisi
+    // string non-kosong, transaksi WAJIB bawa nilai yang sama persis. Pola nyata di
+    // migRunImport() (app.html): `uom: r.normalizedData.uom || null` — string kosong
+    // ('') dari CSV source jadi null di dokumen transaksi, sedangkan migrationRows tetap
+    // menyimpan string asli (termasuk string kosong) apa adanya. Fungsi ini menyamakan
+    // '' di sisi row dengan null di sisi transaksi supaya baris CSV yang kolomnya kosong
+    // tidak salah-tolak, tanpa mewajibkan field itu terisi secara global.
+    function migRowSourceFieldMatches(txVal, rowVal) {
+      return (rowVal == null || rowVal == '') ? txVal == null : txVal == rowVal;
+    }
+    // Phase 6-F.2 (§1-§9) — Source-row binding. migrationRows/{migrationId}_{rowNumber}
+    // memakai docId deterministik yang SUDAH ditegakkan Rules di collection migrationRows
+    // (rowId == migrationId + '_' + string(rowNumber)) — jadi get() di sini otomatis
+    // mengambil baris yang BENAR untuk rowNumber ini (menutup celah §9-B: "rowNumber
+    // menunjuk ke baris lain" tidak mungkin terjadi lewat jalur normal). Kalau baris itu
+    // tidak ada sama sekali, get() gagal dan seluruh fungsi ini otomatis false (celah §9-A).
+    // Sengaja TIDAK mensyaratkan migrationRow.importStatus == 'IMPORTED' (§7) — flow app
+    // yang sah membuat transaksi SAAT row masih PENDING, baru update row SESUDAH commit
+    // (lihat migRunImport di app.html) — juga TIDAK invent state machine baru di sini.
+    function migTxRowBindingValid() {
+      let row = get(/databases/$(database)/documents/migrationRows/$(request.resource.data.migrationId + '_' + string(request.resource.data.rowNumber))).data;
+      return row.sourceTransactionId == request.resource.data.sourceTransactionId
+        && row.itemId == request.resource.data.itemId
+        && row.rackId == request.resource.data.rackId
+        && row.historicalKind == request.resource.data.historicalKind
+        && row.effectiveType == request.resource.data.type
+        && migRowSourceFieldMatches(request.resource.data.uom, row.normalizedData.uom)
+        && migRowSourceFieldMatches(request.resource.data.sourceDate, row.normalizedData.date)
+        && migRowSourceFieldMatches(request.resource.data.sourceCreatedByRaw, row.normalizedData.createdByRaw);
+    }
+    // Phase 6-F (§1, §6) — P0 FIX: Canonical Migration Transaction ID / Idempotency.
+    // Sebelumnya TIDAK ADA apa pun di Rules yang mengikat Document ID transaksi
+    // migrasi ke identity sumbernya (sourceSystem + sourceTransactionId) — direct
+    // write bisa memakai ID Firestore acak apa pun untuk transaksi migrasi. Karena
+    // "allow update, delete: if false" di collection ini, satu-satunya penjamin
+    // "identity sama → dokumen sama, tidak bisa dobel" ADALAH Document ID yang
+    // deterministik; tanpa itu, dua transaksi berbeda bisa dibuat untuk
+    // sourceTransactionId yang sama (replay/duplicate), atau ID transaksi migrasi
+    // sama sekali tidak bisa ditelusuri balik ke sumbernya (Provenance, §3).
+    // KETERBATASAN JUJUR (lihat laporan audit "Remaining limitations"): skema asli
+    // di app.html — migTxDocId() — memakai FNV-1a hash 32-bit + regex-replace slug.
+    // Firestore Rules (CEL) TIDAK memiliki regex-replace maupun fungsi hash custom,
+    // jadi byte-exact reconstruction ID dari sourceSystem+sourceTransactionId TIDAK
+    // BISA direplikasi di sini. Yang ditegakkan hanya BENTUK id (prefix "mig__",
+    // 3 segmen dipisah "__", segmen hash 8 hex-char) — cukup untuk menolak ID acak/
+    // sembarang, TAPI TIDAK membuktikan ID tsb benar-benar fungsi deterministik dari
+    // sourceSystem+sourceTransactionId. Penutupan penuh butuh Cloud Function
+    // (di luar scope — app ini sengaja tetap Spark plan, lihat komentar STEP 6 di atas).
+    function migTxIdFormatValid(id) {
+      return id.matches('^mig__[A-Za-z0-9_-]{1,120}__[A-Za-z0-9_-]{1,120}__[0-9a-f]{8}$');
+    }
+    match /transactions/{transactionId} {
+      allow read: if isSignedIn(); // VIEWER = WAREHOUSE untuk read (keputusan Dela)
+      // Jalur NORMAL (Step 6): WAREHOUSE atau ADMIN, dari form Transaksi.
+      allow create: if isWarehouse()
+        && request.resource.data.keys().hasOnly([
+             'itemId', 'type', 'qty', 'rackId', 'vendorId', 'noSjPo', 'note',
+             'createdAt', 'createdBy', 'createdByName'
+           ])
+        && baseTrxFieldsValid();
+      // Jalur MIGRASI (Roadmap Phase 6 — Controlled Historical Data Migration):
+      // ADMIN ONLY (Phase 6.1 Security Model — "siapa yang boleh execute" = ADMIN
+      // ONLY, tidak boleh hanya ditegakkan di UI). Field tambahan provenance wajib ada.
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly([
+             'itemId', 'type', 'qty', 'rackId', 'vendorId', 'noSjPo', 'note',
+             'createdAt', 'createdBy', 'createdByName',
+             'sourceSystem', 'sourceTransactionId', 'migrationId', 'historicalKind',
+             'uom', 'sourceDate', 'sourceCreatedByRaw', 'rowNumber'
+           ])
+        && baseTrxFieldsValid()
+        && migrationTrxFieldsValid()
+        && migTxIdFormatValid(transactionId);
+      allow update: if false;
+      // v6.7 — Cleanup Mode: delete HANYA boleh saat cleanupModeActive() (jendela
+      // pendek, default tertutup — lihat definisi fungsi di atas). Di luar jendela
+      // itu, transaksi tetap permanen seperti sebelumnya (allow delete: if false
+      // secara efektif, karena cleanupModeActive() default false). Dipakai khusus
+      // untuk membersihkan batch migrasi yang datanya salah & belum pernah dipakai
+      // secara fisik — TIDAK dimaksudkan untuk koreksi transaksi normal (pakai
+      // Reversal untuk itu, sesuai desain asli).
+      allow delete: if isAdmin() && (cleanupModeActive() || factoryResetModeActive());
+    }
+    // P0-01: tanpa Cloud Function (Spark plan), invariant "saldo berasal dari
+    // transaksi yang sah" ditegakkan pakai getAfter() — memaksa setiap write ke
+    // stockBalances/stockByRacks disertai dokumen transactions yang dibuat DI
+    // COMMIT YANG SAMA (client kirim lastTransactionId, rules baca transaksi itu
+    // via getAfter dan cocokkan angkanya persis). Tidak bisa lagi tulis saldo
+    // tanpa transaksi yang sah menyertainya — kalaupun ada yang mencoba
+    // memanipulasi, transaksi pemicunya tetap tercatat permanen di ledger
+    // (transactions tidak bisa diedit/dihapus), jadi tidak lagi "invisible".
+    // Phase 6-F (Security Deep Audit, 17 Agustus 2026) — P0 FIX: existsAfter() saja
+    // TIDAK membuktikan transaksi itu dibuat DI COMMIT YANG SAMA seperti yang diklaim
+    // komentar di atas — existsAfter() bernilai true untuk transaksi APAPUN yang sudah
+    // ada sebelumnya juga. Root cause: tidak ada apa pun di sini yang menolak
+    // lastTransactionId menunjuk ke transaksi LAMA yang sah (sudah pernah dipakai
+    // memutakhirkan saldo sebelumnya). Akibatnya user WAREHOUSE (role yang memang
+    // legit boleh menulis stockBalances) bisa melewati app.html dan menulis langsung
+    // ke Firestore: pakai ULANG transactionId lama milik item yang sama sebagai
+    // lastTransactionId, dengan qty baru dihitung persis sesuai formula di atas —
+    // Rules lolos karena tx ADA dan matematikanya cocok, padahal TIDAK ADA transaksi
+    // baru yang tercatat (replay/duplicate stock mutation, P0 di Roadmap §18: "data
+    // corruption", "duplicate stock mutation"). Fix: request.time SAMA untuk semua
+    // dokumen yang disentuh dalam satu commit/runTransaction — dengan mewajibkan
+    // tx.createdAt == request.time, transaksi rujukan HARUS dibuat pada commit yang
+    // sama persis dengan write stockBalances/stockByRacks ini (baseTrxFieldsValid
+    // sudah memaksa createdAt == request.time saat transaksi dibuat). Transaksi lama
+    // (createdAt di masa lalu) otomatis gagal, menutup jalur replay. Konsisten dengan
+    // pola commit app.html (transaction+stockBalances(+stockByRacks) selalu ditulis
+    // dalam satu runTransaction — lihat trxForm submit handler & migRunImport).
+    function stockBalanceConsistent(itemId, newQty) {
+      let tx = getAfter(/databases/$(database)/documents/transactions/$(request.resource.data.lastTransactionId)).data;
+      let oldQty = resource != null ? resource.data.qty : 0;
+      return tx.itemId == itemId &&
+        tx.createdAt == request.time &&
+        ((tx.type == 'MASUK' && newQty == oldQty + tx.qty) ||
+         (tx.type == 'KELUAR' && newQty == oldQty - tx.qty));
+    }
+    function stockByRackConsistent(newQty) {
+      let tx = getAfter(/databases/$(database)/documents/transactions/$(request.resource.data.lastTransactionId)).data;
+      let oldQty = resource != null ? resource.data.qty : 0;
+      return tx.itemId == request.resource.data.itemId &&
+        tx.rackId == request.resource.data.rackId &&
+        tx.createdAt == request.time &&
+        ((tx.type == 'MASUK' && newQty == oldQty + tx.qty) ||
+         (tx.type == 'KELUAR' && newQty == oldQty - tx.qty));
+    }
+    // Celah yang sama juga berlaku di jalur koreksi (Phase 5): lastCorrectionId bisa
+    // direplay dari stockCorrections lama. Ditutup dengan cara sama — corr.createdAt
+    // harus == request.time (executeRecovery() di app.html sudah menulis stockCorrections
+    // + stockBalances dalam satu runTransaction, jadi tidak ada perubahan perilaku legit).
+    function stockCorrectionConsistent(itemId, newQty) {
+      let corr = getAfter(/databases/$(database)/documents/stockCorrections/$(request.resource.data.lastCorrectionId)).data;
+      return corr.itemId == itemId && corr.newQty == newQty && corr.createdAt == request.time;
+    }
+    match /stockBalances/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isWarehouse() && (
+        (
+          // Jalur NORMAL: hasil transaksi MASUK/KELUAR (lihat trxForm submit handler).
+          // Roadmap Phase 1.5 — Canonical Stock Document: kunci struktur field persis.
+          request.resource.data.keys().hasOnly(['qty', 'itemId', 'lastTransactionId', 'updatedAt']) &&
+          request.resource.data.qty is number && request.resource.data.qty >= 0 &&
+          request.resource.data.itemId == itemId &&
+          request.resource.data.lastTransactionId is string &&
+          request.resource.data.updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/transactions/$(request.resource.data.lastTransactionId)) &&
+          stockBalanceConsistent(itemId, request.resource.data.qty)
+        ) || (
+          // Jalur KOREKSI (Roadmap Phase 5 — Controlled Data Recovery): ADMIN-only,
+          // wajib menyertakan dokumen stockCorrections (audit log, immutable, wajib
+          // field `reason`) di commit yang sama — lihat executeRecovery() di app.html.
+          // Tidak ada jalur "silent repair": stockBalances TIDAK BISA berubah tanpa
+          // audit log yang menyertainya dan angkanya harus persis cocok.
+          isAdmin() &&
+          request.resource.data.keys().hasOnly(['qty', 'itemId', 'lastCorrectionId', 'updatedAt']) &&
+          request.resource.data.qty is number && request.resource.data.qty >= 0 &&
+          request.resource.data.itemId == itemId &&
+          request.resource.data.lastCorrectionId is string &&
+          request.resource.data.updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/stockCorrections/$(request.resource.data.lastCorrectionId)) &&
+          stockCorrectionConsistent(itemId, request.resource.data.qty)
+        )
+      );
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8
+    }
+    match /stockByRacks/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isWarehouse()
+        // Roadmap Phase 1.5 — Canonical Stock Document: kunci struktur field persis
+        // { qty, itemId, rackId, lastTransactionId, updatedAt } — tidak boleh ada field lain.
+        && request.resource.data.keys().hasOnly(['qty', 'itemId', 'rackId', 'lastTransactionId', 'updatedAt'])
+        && request.resource.data.qty is number
+        && request.resource.data.qty >= 0
+        && request.resource.data.itemId is string
+        && request.resource.data.rackId is string
+        && docId == request.resource.data.itemId + '_' + request.resource.data.rackId
+        && request.resource.data.lastTransactionId is string
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/transactions/$(request.resource.data.lastTransactionId))
+        && stockByRackConsistent(request.resource.data.qty)
+      // v6.7 — Cleanup Mode: stockByRacks TIDAK PERNAH punya jalur koreksi resmi
+      // (beda dari stockBalances yang sudah ada Phase 5/stockCorrections) — celah lama,
+      // bukan cuma untuk kasus batch migrasi ini. Ditambah jalur ke-2 KHUSUS cleanup:
+      // ADMIN, HANYA saat cleanupModeActive(), tanpa syarat lastTransactionId (karena
+      // dipakai justru SETELAH transaksi rujukannya dihapus). qty tetap wajib >=0 —
+      // TIDAK BISA dipaksa ke angka negatif walau cleanup mode aktif.
+      || (
+        isAdmin() && cleanupModeActive()
+        && request.resource.data.keys().hasOnly(['qty', 'itemId', 'rackId', 'updatedAt'])
+        && request.resource.data.qty is number
+        && request.resource.data.qty >= 0
+        && request.resource.data.itemId is string
+        && request.resource.data.rackId is string
+        && docId == request.resource.data.itemId + '_' + request.resource.data.rackId
+        && request.resource.data.updatedAt == request.time
+      );
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8
+    }
+
+    // --- codeLocks (P1-04): penjamin atomic uniqueness itemCode/categoryCode/vendorCode ---
+    // create/delete dalam runTransaction bareng doc item/kategori/vendor-nya (lihat client).
+    match /codeLocks/{lockId} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if false; // lock tidak pernah diedit, hanya create (kode baru) / delete (ganti kode)
+    }
+
+    // --- stockCorrections (Roadmap Phase 5): audit log Controlled Data Recovery ---
+    // Immutable, create-only, ADMIN-only, wajib field `reason` non-kosong. Setiap
+    // baris di sini adalah bukti permanen "siapa memperbaiki apa, kapan, dan kenapa"
+    // — dibaca oleh stockBalanceConsistent's counterpart (stockCorrectionConsistent)
+    // di atas untuk memvalidasi write stockBalances jalur koreksi.
+    match /stockCorrections/{correctionId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly([
+             'itemId', 'oldQty', 'newQty', 'reason', 'createdAt', 'createdBy', 'createdByName'
+           ])
+        && request.resource.data.itemId is string
+        && request.resource.data.oldQty is number
+        // Phase 6-F (§8) — P0 FIX: oldQty dulu murni klaim client, tidak pernah
+        // dicocokkan ke stockBalances.qty AKTUAL saat penulisan. newQty sudah
+        // ditegakkan konsisten lewat stockCorrectionConsistent() saat stockBalances
+        // ditulis, TAPI oldQty di audit log stockCorrections sendiri bisa dipalsukan
+        // (mis. ADMIN menulis oldQty=0 padahal saldo sebenarnya 500, membuat log
+        // seolah koreksi dari kekosongan) — audit trail (§8 requirement) jadi tidak
+        // bisa dipercaya. Ditutup: oldQty wajib == stockBalances.qty saat ini
+        // (atau 0 kalau dokumen stockBalances belum pernah ada).
+        && request.resource.data.oldQty == (
+             exists(/databases/$(database)/documents/stockBalances/$(request.resource.data.itemId))
+             ? get(/databases/$(database)/documents/stockBalances/$(request.resource.data.itemId)).data.qty
+             : 0
+           )
+        && request.resource.data.newQty is number && request.resource.data.newQty >= 0
+        && request.resource.data.reason is string && request.resource.data.reason.size() > 0
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdByName is string
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false; // audit log — tidak pernah diedit/dihapus
+    }
+
+    // --- migrationBatches / migrationRows (Roadmap Phase 6 — Controlled Historical
+    // Data Migration). Staging area, ADMIN ONLY di setiap langkah (upload, validate,
+    // confirm, execute, resume, cancel — lihat Phase 6.1 Actor/Role Matrix).
+    // Read dibatasi ke ADMIN juga (bukan isSignedIn) karena berisi data staging
+    // mentah dari sistem lama yang belum tentu layak dilihat WAREHOUSE biasa.
+    // Roadmap Phase 6-A/6-C (audit 17 Agustus 2026) — reconciliationDetail
+    // ditambahkan untuk menyimpan breakdown per-level (L1-L5) hasil Deep Migration
+    // Reconciliation, terpisah dari reconciliationStatus (ringkasan PASS/WARNING/FAILED)
+    // dan reconciliationNote (ringkasan count L1) yang sudah ada sejak Phase 6.13.
+    function migBatchFieldKeys() {
+      return ['sourceSystem', 'sourceFileName', 'uploadedBy', 'uploadedByName', 'uploadedAt',
+              'status', 'totalRows', 'validRows', 'warningRows', 'invalidRows',
+              'importedRows', 'failedRows', 'confirmedBy', 'confirmedAt', 'updatedAt',
+              'reconciliationStatus', 'reconciliationNote', 'reconciliationDetail'];
+    }
+    // Status yang begitu tercapai TIDAK BOLEH ditulis ulang lagi (Roadmap §18 —
+    // Completion Gate: COMPLETED/RECONCILIATION_FAILED hanya boleh dijangkau lewat
+    // migRunDeepReconciliation, dan sekali dijangkau, batch selesai — final).
+    // CANCELLED juga final (admin sudah membatalkan, tidak ada jalan balik).
+    function migTerminalStatuses() {
+      return ['COMPLETED', 'RECONCILIATION_FAILED', 'CANCELLED'];
+    }
+    // Phase 6-F (§4) — P0 FIX: Completion Gate. migBatchLegalTransition() di bawah
+    // cuma memvalidasi NAMA status (RECONCILING → COMPLETED selalu terstruktur sah),
+    // tapi TIDAK PERNAH mensyaratkan reconciliationStatus == PASS/WARNING seperti
+    // yang diklaim komentar lama di allow-update ("SEKALIGUS menutup celah IMPORTED
+    // tapi field lain diam-diam berubah") — itu benar untuk field immutability,
+    // TAPI tidak menutup "COMPLETED tanpa reconciliation lulus". Sebelumnya batch
+    // bisa ditulis RECONCILING → COMPLETED dengan reconciliationStatus == 'FAILED'
+    // atau bahkan tanpa reconciliationStatus sama sekali — lolos DENY. Ditutup di sini.
+    function migCompletionGateValid() {
+      return request.resource.data.status != 'COMPLETED' ||
+        request.resource.data.reconciliationStatus in ['PASS', 'WARNING'];
+    }
+    // Phase 6-F (Security Deep Audit) — P1 FIX: sebelumnya "allow update" cuma
+    // mensyaratkan status baru ANGGOTA daftar status yang sah (union semua status),
+    // TANPA cek transisi dari status LAMA ke status BARU itu sendiri masuk akal atau
+    // tidak — non-terminal state di luar terminal boleh "melompat" bebas (mis.
+    // VALIDATED langsung ke COMPLETED tanpa pernah lewat IMPORTING/RECONCILING).
+    // Peta di bawah = graf transisi NYATA yang dipakai app.html (migRunImport,
+    // migResumeImport, migRunDeepReconciliation, migCancelBatch) — self-loop (status
+    // tidak berubah) selalu diizinkan supaya checkpoint progres (importedRows/
+    // failedRows tiap 20 baris, atau reconciliationStatus saat query index belum
+    // siap) yang tidak menyentuh field status tetap bisa jalan.
+    function migBatchLegalTransition(oldStatus, newStatus) {
+      return oldStatus == newStatus ||
+        (oldStatus == 'VALIDATED' && newStatus in ['READY_TO_IMPORT', 'CANCELLED']) ||
+        (oldStatus == 'VALIDATION_FAILED' && newStatus in ['READY_TO_IMPORT', 'CANCELLED']) ||
+        (oldStatus == 'READY_TO_IMPORT' && newStatus in ['IMPORTING', 'CANCELLED']) ||
+        (oldStatus == 'IMPORTING' && newStatus in ['PARTIAL', 'IMPORT_FAILED', 'RECONCILING']) ||
+        (oldStatus == 'PARTIAL' && newStatus == 'IMPORTING') ||
+        (oldStatus == 'IMPORT_FAILED' && newStatus == 'IMPORTING') ||
+        (oldStatus == 'RECONCILING' && newStatus in ['COMPLETED', 'RECONCILIATION_FAILED']);
+    }
+    function migBatchCoreFieldsValid() {
+      return request.resource.data.sourceSystem is string && request.resource.data.sourceSystem.size() > 0
+        && request.resource.data.sourceFileName is string
+        && request.resource.data.uploadedBy is string
+        && request.resource.data.uploadedByName is string
+        && request.resource.data.uploadedAt is timestamp
+        && request.resource.data.status is string
+        && request.resource.data.totalRows is number
+        && request.resource.data.validRows is number
+        && request.resource.data.warningRows is number
+        && request.resource.data.invalidRows is number
+        && request.resource.data.importedRows is number
+        && request.resource.data.failedRows is number;
+    }
+    match /migrationBatches/{migrationId} {
+      allow read: if isAdmin();
+      // Phase 6-C (audit 17 Agustus 2026) — root-cause fix: versi lama Rules ini
+      // mewajibkan create dengan status == 'UPLOADED', TAPI app.js SELALU membuat
+      // batch dengan status VALIDATED/VALIDATION_FAILED langsung (validasi berjalan
+      // SINKRON di client sebelum batch pernah ditulis — lihat komentar migUpload
+      // di app.js), jadi setiap create sebelumnya DITOLAK Rules ini (bug P0: fitur
+      // upload migrasi tidak akan pernah berhasil menulis ke Firestore sungguhan).
+      // UPLOADED/VALIDATING sengaja tidak pernah dipersist (transient, in-memory).
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(migBatchFieldKeys())
+        && request.resource.data.uploadedBy == request.auth.uid
+        && request.resource.data.uploadedAt == request.time
+        && request.resource.data.status in ['VALIDATED', 'VALIDATION_FAILED']
+        && migBatchCoreFieldsValid();
+      // Transisi status normal (VALIDATED → READY_TO_IMPORT → IMPORTING → PARTIAL/
+      // IMPORT_FAILED/RECONCILING → COMPLETED/RECONCILIATION_FAILED, atau CANCELLED).
+      // Field identitas batch (siapa upload, kapan, dari sistem apa) immutable sejak
+      // dibuat. Begitu status mencapai salah satu migTerminalStatuses(), TIDAK ADA
+      // update apa pun lagi yang diizinkan (termasuk reconciliation record) — jadi
+      // satu rule ini SEKALIGUS menutup celah "IMPORTED tapi field lain diam-diam
+      // berubah" (masalah lama) dan mengizinkan migRunDeepReconciliation menulis
+      // status+reconciliation fields sekaligus dalam SATU update (Phase 6-A).
+      allow update: if isAdmin()
+        && !(resource.data.status in migTerminalStatuses())
+        && request.resource.data.keys().hasOnly(migBatchFieldKeys())
+        && request.resource.data.sourceSystem == resource.data.sourceSystem
+        && request.resource.data.sourceFileName == resource.data.sourceFileName
+        && request.resource.data.uploadedBy == resource.data.uploadedBy
+        && request.resource.data.uploadedAt == resource.data.uploadedAt
+        && migBatchLegalTransition(resource.data.status, request.resource.data.status)
+        && migCompletionGateValid()
+        && migBatchCoreFieldsValid();
+      allow delete: if isAdmin() && factoryResetModeActive(); // v6.8 (semula: if false — batch tidak bisa dihapus di luar reset total)
+    }
+
+    // Phase 6-E — Provenance Deep Audit: "imported row requires transactionId" harus
+    // ditegakkan Rules, bukan cuma asumsi app.js selalu benar. IMPORTED/DUPLICATE wajib
+    // punya transactionId (string non-kosong) — hasil akhir migrasi harus tertelusur ke
+    // transaksi nyata. Status lain (PENDING/FAILED/BLOCKED) wajib transactionId == null —
+    // tidak boleh ada row "gagal/blocked" yang seolah-olah menunjuk ke transaksi.
+    function migRowTransactionIdValid() {
+      return request.resource.data.importStatus in ['IMPORTED', 'DUPLICATE']
+        ? (request.resource.data.transactionId is string && request.resource.data.transactionId.size() > 0)
+        : request.resource.data.transactionId == null;
+    }
+    match /migrationRows/{rowId} {
+      allow read: if isAdmin();
+      // Phase 6.2 — dibuat sekali per baris hasil parsing file, saat batch masuk
+      // status VALIDATING/VALIDATED. rowId dibentuk deterministik oleh client
+      // ({migrationId}_{rowNumber}) supaya tidak ada baris duplikat per-batch.
+      // Phase 6-A.2 (audit 17 Agustus 2026) — effectiveType/historicalKind kini
+      // disimpan di staging row sejak upload (dulu hanya diturunkan ulang saat
+      // import/resume, tidak pernah dipersist), supaya Deep Migration Reconciliation
+      // bisa membandingkan row EXPECTED vs transaction ACTUAL langsung dari data
+      // staging tanpa re-derivasi yang bisa drift dari logika import.
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly([
+             'migrationId', 'rowNumber', 'sourceTransactionId', 'normalizedData',
+             'itemId', 'rackId', 'effectiveType', 'historicalKind', 'mappingStatus',
+             'validationStatus', 'validationErrors', 'validationWarnings', 'importStatus',
+             'transactionId', 'importedAt'
+           ])
+        && request.resource.data.migrationId is string
+        // Phase 6-F (§5) — P0 FIX: dulu cuma "is number" — rowNumber == 0 atau
+        // negatif masih lolos (docId jadi "{migrationId}_0" / "..._-1", technically
+        // unik per nilai tapi melanggar invariant "row identity positif & berurutan"
+        // yang diasumsikan reconciliation L1-L6). Tambah rowNumber > 0.
+        // Phase 6-F.2 (§4) — P0 FIX: masih belum menolak pecahan (1.5/2.7) — docId
+        // jadi "{migrationId}_1.5", dan migTxRowBindingValid() di collection
+        // transactions membangun path lookup dari int rowNumber transaksi, jadi baris
+        // dengan rowNumber pecahan tidak akan pernah bisa dirujuk transaksi manapun
+        // (silent orphan row). Tambah rowNumber == int(rowNumber).
+        && request.resource.data.rowNumber is number && request.resource.data.rowNumber > 0
+        && request.resource.data.rowNumber == int(request.resource.data.rowNumber)
+        // Phase 6-F (Security Deep Audit) — P2 FIX: komentar di atas bilang rowId
+        // "dibentuk deterministik oleh client ({migrationId}_{rowNumber}) supaya tidak
+        // ada baris duplikat per-batch", tapi sebelumnya TIDAK ADA apa pun di Rules
+        // yang menegakkan itu — direct write bisa memakai rowId bebas dan membuat
+        // baris duplikat (rowNumber sama, dokumen beda) untuk migrationId yang sama,
+        // yang akan merusak asumsi 1-baris-1-dokumen di L1-L6 reconciliation.
+        // Ditegakkan sekarang, sama seperti pola docId di stockByRacks.
+        && rowId == request.resource.data.migrationId + '_' + string(request.resource.data.rowNumber)
+        && request.resource.data.sourceTransactionId is string
+        && (request.resource.data.effectiveType == null || request.resource.data.effectiveType in ['MASUK', 'KELUAR'])
+        && request.resource.data.historicalKind in ['TRANSACTION', 'OPENING_BALANCE']
+        && request.resource.data.mappingStatus in ['MATCHED', 'UNMAPPED', 'AMBIGUOUS']
+        && request.resource.data.validationStatus in ['VALID', 'WARNING', 'INVALID']
+        // Phase 6-F.3 (P1 FIX) — dulu CREATE mengizinkan importStatus langsung diklaim
+        // sebagai 'IMPORTED'/'DUPLICATE'/'FAILED'/'BLOCKED' (final state) sejak baris
+        // pertama kali dibuat, dengan migRowTransactionIdValid() hanya memvalidasi BENTUK
+        // transactionId (string tidak kosong), bukan keasliannya — direct Firestore write
+        // oleh ADMIN bisa membuat staging row yang SUDAH mengklaim sukses/gagal/duplikat
+        // import dengan transactionId palsu, padahal baris itu tidak pernah lewat
+        // migRunImport(). PENTING (deviasi terverifikasi dari draf awal — lihat audit
+        // statis): app.html (migUploadBtn handler, baris ~2160) MEMANG menulis
+        // importStatus: 'BLOCKED' LANGSUNG SAAT CREATE — bukan lewat update — untuk baris
+        // yang validationStatus-nya 'INVALID' (gagal validasi format/mapping sebelum
+        // sempat masuk antrian import sama sekali; lihat toProcess filter di migRunImport
+        // yang men-skip INVALID). Melarang BLOCKED sepenuhnya di CREATE (sesuai draf
+        // literal) akan mematahkan alur upload berkas yang sah. Fix yang benar: baris
+        // hanya boleh lahir di salah satu dari dua state netral —
+        //   (a) PENDING — baris valid/warning, siap masuk antrian import, ATAU
+        //   (b) BLOCKED — HANYA jika validationStatus-nya sendiri sudah 'INVALID' di
+        //       payload yang sama (bukan klaim independen; baris tidak bisa mengaku
+        //       "diblokir" kalau validationStatus-nya sendiri bilang VALID/WARNING) —
+        // dan transactionId/importedAt WAJIB null di kedua state (final state IMPORTED/
+        // DUPLICATE/FAILED — yang membuktikan proses import benar-benar terjadi — tetap
+        // TIDAK BISA diklaim di CREATE sama sekali, hanya lewat allow update di bawah).
+        && (
+             request.resource.data.importStatus == 'PENDING'
+             || (request.resource.data.importStatus == 'BLOCKED'
+                 && request.resource.data.validationStatus == 'INVALID')
+           )
+        && request.resource.data.transactionId == null
+        && request.resource.data.importedAt == null
+        && exists(/databases/$(database)/documents/migrationBatches/$(request.resource.data.migrationId));
+      // Phase 6.11/6.12 — Import engine & Resume: hanya importStatus/transactionId/
+      // importedAt yang boleh berubah.
+      // Phase 6-E (audit 17 Agustus 2026) — root-cause fix: versi lama hanya mengunci
+      // baris yang SUDAH 'IMPORTED', padahal DUPLICATE/FAILED/BLOCKED di app.js juga
+      // TIDAK PERNAH ditulis ulang lagi (migResumeImport hanya query importStatus ==
+      // 'PENDING', lihat migResumeImport) — jadi Rules yang masih mengizinkan update di
+      // atas status-status itu adalah celah yang tidak dipakai app tapi tetap terbuka
+      // untuk penulisan langsung. Sekarang HANYA baris berstatus PENDING yang boleh
+      // ditransisikan (satu kali, ke status akhir) — konsisten dengan finality ledger
+      // transaksi yang juga immutable begitu tercatat.
+      allow update: if isAdmin()
+        && resource.data.importStatus == 'PENDING'
+        && request.resource.data.migrationId == resource.data.migrationId
+        && request.resource.data.rowNumber == resource.data.rowNumber
+        && request.resource.data.sourceTransactionId == resource.data.sourceTransactionId
+        && request.resource.data.normalizedData == resource.data.normalizedData
+        && request.resource.data.importStatus in ['IMPORTED', 'DUPLICATE', 'FAILED']
+        && migRowTransactionIdValid()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['importStatus', 'transactionId', 'importedAt']);
+      allow delete: if isAdmin() && (cleanupModeActive() || factoryResetModeActive()); // v6.7/6.8
+    }
+
+    // --- settings ---
+    // counters perlu ditulis client (ADMIN) via runTransaction untuk generate
+    // itemId/vendorId/categoryId sekuensial saat Master Data dibuat (Step 4).
+    match /settings/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // --- systemFlags (v6.7 — Cleanup Mode) ---
+    // Satu dokumen kecil (systemFlags/cleanupMode) yang jadi saklar untuk delete
+    // transactions/migrationRows & tulis-langsung stockByRacks (lihat cleanupModeActive()
+    // di atas dan match /stockByRacks di bawah). ADMIN toggle dari app (habis diminta
+    // PIN — pengaman klik-tidak-sengaja di UI, BUKAN pengganti proteksi ini). Skema
+    // dikunci ketat supaya enabledUntil tidak bisa diset sembarang jauh ke depan dari
+    // client (maks 30 menit dari saat ini) — membatasi jendela cleanup tetap pendek
+    // walau ADMIN lupa mematikannya manual.
+    // --- systemFlags (v6.7 Cleanup Mode, v6.8 + Factory Reset Mode) ---
+    // Dua dokumen kecil (cleanupMode, factoryResetMode) yang jadi saklar untuk
+    // delete/tulis-langsung yang sengaja dipisah dari operasi normal — lihat
+    // cleanupModeActive()/factoryResetModeActive() di atas. ADMIN toggle dari app
+    // (habis diminta PIN — pengaman klik-tidak-sengaja di UI, BUKAN pengganti
+    // proteksi ini). Skema dikunci ketat supaya enabledUntil tidak bisa diset
+    // sembarang jauh ke depan dari client (maks 30 menit dari saat ini) —
+    // membatasi jendela tetap pendek walau ADMIN lupa mematikannya manual.
+    match /systemFlags/{flagId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin()
+        && flagId in ['cleanupMode', 'factoryResetMode']
+        && request.resource.data.keys().hasOnly(['enabled', 'enabledUntil', 'enabledBy', 'enabledByName', 'enabledAt'])
+        && request.resource.data.enabled is bool
+        && request.resource.data.enabledUntil is timestamp
+        && request.resource.data.enabledUntil <= request.time + duration.value(30, 'm')
+        && request.resource.data.enabledBy == request.auth.uid
+        && request.resource.data.enabledAt == request.time;
+    }
+
+    // --- migrationCleanupLog (v6.7) ---
+    // Audit log permanen (create-only, immutable — pola sama persis dgn stockCorrections)
+    // untuk tiap kali fitur "Hapus Batch (Cleanup)" dipakai. migrationBatches doc ASLI
+    // TIDAK disentuh/dihapus (tetap jadi bukti "batch ini pernah diupload & diimpor
+    // sekian baris") — log ini terpisah, mencatat "batch ini BELAKANGAN dibersihkan,
+    // oleh siapa, kapan, kenapa, berapa baris/transaksi yang dihapus".
+    match /migrationCleanupLog/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly([
+             'migrationId', 'sourceFileName', 'deletedTransactionCount', 'deletedRowCount',
+             'reason', 'performedBy', 'performedByName', 'performedAt'
+           ])
+        && request.resource.data.migrationId is string
+        && request.resource.data.deletedTransactionCount is number
+        && request.resource.data.deletedRowCount is number
+        && request.resource.data.reason is string && request.resource.data.reason.size() > 0
+        && request.resource.data.performedBy == request.auth.uid
+        && request.resource.data.performedAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}
