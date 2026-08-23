@@ -3,7 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<title>RDI Indirect Inventory v6.59</title>
+<title>RDI Indirect Inventory v6.70</title>
+<!-- v6.70 MANIFEST GUDANG — display type: Barlow Condensed (signage-derived) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&display=swap" rel="stylesheet">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#146C43">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -1162,6 +1166,141 @@
   .stg-filebtn svg{width:18px;height:18px;color:var(--color-primary);flex-shrink:0;}
   .stg-filebtn span{font-size:11.5px;color:var(--ink-600);}
   .stg-filebtn input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;}
+
+  /* ================================================================
+     v6.70 — UI REFRESH: "MANIFEST GUDANG"
+     Bahasa visual: kartu tag inventaris fisik (kertas manila + lubang
+     punch), signase gudang (Barlow Condensed), kode warna safety.
+     Override layer murni presentational — nol perubahan markup/JS/
+     business logic. Urutan cascade: aturan di sini MENANG atas rule
+     sama-spesifisitas di atas. Tidak menyentuh selector yang dipakai
+     event handler (hanya properti visual).
+     ================================================================ */
+  :root{
+    --font-display:'Barlow Condensed','Arial Narrow',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    --wm-paper:#EFEDE4;      /* latar dasar: kemasan/kertas gudang, kusam abu-hijau */
+    --wm-paper-2:#F8F6EE;    /* permukaan kartu: tag manila terang */
+    --wm-line:#DCD8CA;       /* garis tepi tag */
+    --wm-plate:#20302A;      /* pelat logam hijau-tinta (topbar/nav/boot) */
+    --wm-safety:#F2B705;     /* kuning safety — FUNGSIONAL: FAB scan & fokus saja */
+    --radius-lg:16px;--radius-xl:18px;--radius-md:12px;--radius-sm:8px;
+  }
+  ::selection{background:rgba(242,183,5,.35);}
+
+  /* ---- latar: kertas gudang menggantikan cool-gray blueprint ---- */
+  .bg-scene{
+    background:
+      radial-gradient(900px 520px at 88% -6%, rgba(20,108,67,.07), transparent 60%),
+      linear-gradient(180deg,#F1EFE6 0%,#EBE9DE 58%,#E3E1D4 100%);
+  }
+  .bg-scene::before{opacity:.45;}
+
+  /* ---- glass -> kertas tag (permukaan solid, tanpa blur) ---- */
+  .glass{
+    background:var(--wm-paper-2);
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+    border:1px solid var(--wm-line);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 10px 26px -20px rgba(28,36,32,.5);
+  }
+
+  /* ---- boot splash: pelat gelap + ikon safety ---- */
+  #boot-splash .boot-badge{background:var(--wm-plate);box-shadow:0 14px 30px -14px rgba(28,36,32,.55);}
+  #boot-splash .boot-badge svg path{stroke:var(--wm-safety);}
+  .boot-title{font-family:var(--font-display);text-transform:uppercase;font-weight:800;font-size:21px;letter-spacing:.13em;}
+  .boot-sub{letter-spacing:.16em;}
+
+  /* ---- topbar: pelat stensil gelap ---- */
+  header.topbar{background:var(--wm-plate);border-color:rgba(255,255,255,.06);box-shadow:0 16px 34px -22px rgba(20,30,25,.7);}
+  header.topbar .tb-name{color:#F2F1E8;font-family:var(--font-display);font-weight:700;font-size:19px;line-height:36px;letter-spacing:.09em;text-transform:uppercase;}
+  header.topbar .tb-badge{background:var(--wm-safety);box-shadow:none;}
+  header.topbar .tb-badge svg path{stroke:var(--wm-plate);}
+  header.topbar .conn-pill{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.12);color:#C9D6CE;}
+  header.topbar .icon-btn{background:rgba(255,255,255,.07);color:#F2F1E8;}
+  header.topbar .icon-btn:active{background:rgba(255,255,255,.15);}
+
+  /* ---- bottom nav: pelat senada + aktif safety ---- */
+  nav.bottom-nav{background:var(--wm-plate);border-color:rgba(255,255,255,.06);box-shadow:0 18px 38px -20px rgba(20,30,25,.65);}
+  nav.bottom-nav .nav-item{color:#93A79B;}
+  nav.bottom-nav .nav-item.active{color:var(--wm-safety);background:rgba(242,183,5,.13);}
+  .nav-indicator{display:none;} /* pill aktif safety sudah cukup sebagai penanda — underline jadi redundan di pelat gelap */
+
+  /* ---- SIGNATURE: FAB Scan = tombol safety dengan radar idle ---- */
+  .nav-item-fab{position:relative;}
+  .nav-item-fab::after{
+    content:'';position:absolute;left:50%;bottom:27px;width:54px;height:54px;margin-left:-27px;
+    border-radius:50%;border:2px solid rgba(242,183,5,.55);
+    animation:wm-radar 2.6s ease-out infinite;pointer-events:none;
+  }
+  @keyframes wm-radar{
+    0%{transform:scale(.8);opacity:.7;}
+    70%,100%{transform:scale(1.28);opacity:0;}
+  }
+  .nav-item-fab .fab-circle{
+    position:relative;z-index:1;
+    background:var(--wm-safety);color:var(--wm-plate);
+    box-shadow:0 12px 26px -10px rgba(150,110,0,.6),0 0 0 5px rgba(239,237,228,.92);
+  }
+  .nav-item-fab.active .fab-circle{background:#DBA800;}
+
+  /* ---- kartu KPI dashboard: tag inventaris + lubang punch ---- */
+  .dash-card{
+    background:var(--wm-paper-2);border-color:var(--wm-line);
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+  }
+  .dash-card::after{
+    content:'';position:absolute;top:9px;right:9px;width:9px;height:9px;border-radius:50%;
+    background:#E4E1D3;box-shadow:inset 0 1px 2px rgba(0,0,0,.25),0 1px 0 rgba(255,255,255,.8);
+  }
+  .dash-card-value{
+    font-family:var(--font-display);font-weight:800;font-size:34px;line-height:1;
+    letter-spacing:.01em;font-variant-numeric:tabular-nums;
+  }
+  .dash-card-label{text-transform:uppercase;letter-spacing:.09em;font-size:10px;font-weight:700;color:var(--ink-600);}
+  @media (max-width:390px){
+    .dash-card:nth-child(-n+2) .dash-card-value{font-size:27px;}
+  }
+
+  /* ---- login: kartu manifest — strip hazard hijau + lubang punch ---- */
+  #login-screen .login-card{
+    position:relative;overflow:hidden;
+    background:var(--wm-paper-2);backdrop-filter:none;-webkit-backdrop-filter:none;
+    border:1px solid var(--wm-line);
+    box-shadow:0 26px 52px -30px rgba(28,36,32,.5);
+  }
+  #login-screen .login-card::before{
+    content:'';position:absolute;top:0;left:0;right:0;height:7px;
+    background:repeating-linear-gradient(-45deg,#146C43 0 14px,#0F5433 14px 28px);
+  }
+  #login-screen .login-card::after{
+    content:'';position:absolute;top:24px;right:22px;width:14px;height:14px;border-radius:50%;
+    background:#E7E4D7;
+    box-shadow:inset 0 1px 3px rgba(0,0,0,.3),0 1px 0 #FFFFFF;
+  }
+  #login-screen .login-card h1{
+    font-family:var(--font-display);text-transform:uppercase;
+    font-weight:800;font-size:27px;letter-spacing:.05em;
+  }
+  .login-avatar{position:relative;z-index:2;margin-top:28px;border-radius:12px;background:linear-gradient(155deg,#1A7D4D,#0F5433);border:4px solid var(--wm-paper-2);}
+  .field-wrap{background:rgba(255,255,255,.92);border-color:#EDECDF;}
+  .btn-primary{box-shadow:0 10px 22px -10px rgba(20,108,67,.5);}
+
+  /* ---- modal sheet: kertas tag senada ---- */
+  .modal-sheet{
+    background:var(--wm-paper-2);backdrop-filter:none;-webkit-backdrop-filter:none;
+    border:1px solid var(--wm-line);
+  }
+
+  /* ---- fokus keyboard: safety yellow (kontras di atas kertas) ---- */
+  .btn-primary:focus-visible,.btn-ghost:focus-visible,.btn-action:focus-visible,
+  .icon-btn:focus-visible,.icon-btn-sm:focus-visible,.action-tile:focus-visible,
+  .m-add-btn:focus-visible,.modal-close:focus-visible,.segmented button:focus-visible{
+    outline-color:var(--wm-safety);
+  }
+
+  /* ---- reduced motion: matikan radar ---- */
+  @media (prefers-reduced-motion:reduce){
+    .nav-item-fab::after{animation:none;opacity:0;}
+  }
 </style>
 </head>
 <body>
@@ -1207,7 +1346,7 @@
     </form>
     <div class="login-divider"></div>
     <div class="login-foot">Belum punya akun? Hubungi Admin</div>
-    <div class="login-foot" style="margin-top:6px;opacity:.6;">v4.1 · UI Premium Refresh</div>
+    <div class="login-foot" style="margin-top:6px;opacity:.6;">v6.70 · Manifest Gudang</div>
   </div>
 </div>
 
@@ -2625,7 +2764,7 @@ document.addEventListener('keydown', function(e){
 // v6.56 — FITUR BARU (permintaan user): Tambah Rak Banyak — buat banyak rak sekaligus dari 1 prefix + range huruf (mis. prefix "RAK-1-" + Dari "A" + Sampai "Q" -> 17 rak: RAK-1-A s/d RAK-1-Q). Tombol "+ Banyak" baru (id m-add-batch-btn) tampil khusus di tab Rak (Master), tombol "+" existing (m-add-btn, tambah 1 rak manual) tidak diubah. Modal baru (#modal-rakbatch-overlay) reuse struktur modal-overlay/modal-sheet/modal-head yang sudah ada; ada live preview kode + jumlah, dan warning kalau ada kode yang sudah dipakai (kode existing di-skip otomatis, tidak overwrite). Create pakai writeBatch (pola sama dgn writeBatch yang sudah dipakai di file ini), payload per-rak persis sama shape dgn create rak manual (rackCode/rackName/location/zone/status:'ACTIVE') supaya konsisten dgn firestore.rules yang sudah ada — TIDAK ada perubahan Firestore rules/schema/transaction engine/stock calculation. TIDAK ADA fitur hapus rak yang ditambahkan/diubah (dikonfirmasi user di luar scope). JS-only. node --check PASS.
 // v6.55 — FIX bug user: row History Transaksi masih menampilkan info transaksi (rak/vendor/no SJ-PO/nama user) di baris ke-3, padahal seharusnya info item di History = PERSIS sama dengan Master (kode material/nama material/spesifikasi saja, via renderRow('item',...)). Baris trxSub dihapus total dari tampilan renderHistRow (bukan cuma vendor-nya, semua field rak/vendor/noSjPo/createdByName tidak lagi dirender di list — masih tersimpan utuh di dokumen transaksi Firestore untuk reconciliation/ledger/audit trail, tidak dihapus/diubah). Tanggal transaksi (kebutuhan spesifik History, tidak ada di Master) dipindah ke kolom kanan (m-row-tags) di atas badge TYPE, font kecil & dim, supaya tidak lagi bercampur dengan baris data item. JS-only, tidak ada perubahan Firestore schema/rules/transaction engine/stock calculation. node --check PASS.
 // ===============================================================
-const APP_VERSION = 'v6.65';
+const APP_VERSION = 'v6.70';
 console.log('RDI Indirect Inventory', APP_VERSION);
 const pgnVersionEl = document.getElementById('pgn-appversion');
 if (pgnVersionEl) pgnVersionEl.textContent = APP_VERSION;
