@@ -1297,13 +1297,84 @@
     outline-color:var(--wm-safety);
   }
 
+  /* ---- skip navigation link: tersembunyi hingga difokuskan ---- */
+  .skip-link{
+    position:absolute;left:-999px;top:auto;width:1px;height:1px;overflow:hidden;
+    transition:left .3s;
+  }
+  .skip-link:focus{
+    left:20px;width:100%;height:auto;padding:8px;
+    background:var(--color-primary);color:var(--color-primary-on-primary);
+    z-index:1000;
+  }
+
   /* ---- reduced motion: matikan radar ---- */
   @media (prefers-reduced-motion:reduce){
     .nav-item-fab::after{animation:none;opacity:0;}
+    /* Loading spinner slowed/disabled for reduced motion */
+    .boot-ring{animation:spin 4s linear infinite; }
+    @keyframes spin{to{transform:rotate(360deg);}}
+  }
+
+  /* ============================================================
+     DARK MODE — warna & kontras dioptimalkan untuk latar gelap.
+     1) html { color-scheme: light dark; } mengaktifkan pemrosesan
+        warna native di browser (form fields, scrollbar, system colors).
+     2) @media (color-scheme: dark) menimpa token surface/ink agar
+        terbaca dengan jelas di atas latar gelap.
+     3) Semua warna lama (--red-*, --ink-*, surface*) di Light mode
+        tetap bekerja tanpa Override kecuali token yang explicitly di-
+        bawahi diganti.
+     ------------------------------------------------------------ */
+  @media (color-scheme: dark){
+    :root{
+      /* Surface palette gelap — anti blur terhadap background */
+      --surface-0:#1e2430;
+      --surface-1:#161b2b;
+
+      /* Ink teks gelap — kontras 4.5:1 di atas surface-0/1 */
+      --ink-900:#f0f4f8;
+      --ink-600:#aab8c2;
+      --ink-400:#5f6b7c;
+
+      /* Border/divider gelap — still readable */
+      --line:rgba(255,255,255,.08);
+      --grid-line:rgba(255,255,255,.05);
+
+      /* Status warna — sudah cukup distinta, dikoreksi sedikit */
+      --ok:#38a169;
+      --warn:#f6ad5e;
+      --danger:#f87171;
+
+      /* Elevation gelap — shadow warna sedikit diubah untuk terlihat */
+      --shadow-sm:0 2px 8px -4px rgba(30,36,48,.4);
+      --shadow-md:0 10px 26px -10px rgba(30,36,48,.44);
+      --shadow-elevated:0 16px 36px -16px rgba(30,36,48,.44);
+      --shadow-pressed:0 1px 4px -1px rgba(30,36,48,.28);
+    }
+  }
+
+  /* Fallback: kalau browser tidak support color-scheme, tetap gunakan
+     kontras manual saat user mengaktifkan system dark mode lewat CSS. */
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface-0:#1e2430;
+      --surface-1:#161b2b;
+      --ink-900:#f0f4f8;
+      --ink-600:#aab8c2;
+      --ink-400:#5f6b7c;
+      --line:rgba(255,255,255,.08);
+      --grid-line:rgba(255,255,255,.05);
+      --ok:#38a169;
+      --warn:#f6ad5e;
+      --danger:#f87171;
+    }
   }
 </style>
 </head>
 <body>
+  <!-- Skip navigation link — appear on focus only -->
+  <a href="#main-content" class="skip-link">Melompat ke konten utama</a>
 
 <div class="bg-scene"><span class="b1"></span><span class="b2"></span><span class="b3"></span><span class="b4"></span><span class="b5"></span></div>
 
@@ -1372,7 +1443,7 @@
            Ditampilkan hanya kalau salah satu listener sumber data dashboard
            (items/stockBalances/stockByRacks) gagal. Tidak menggantikan
            console.error(), tidak mengubah listener architecture. -->
-      <div class="glass dash-error-banner" id="dash-error-banner" hidden>
+      <div class="glass dash-error-banner" id="main-content" hidden>
         <span>⚠️ Data dashboard belum dapat diperbarui. Periksa koneksi dan coba lagi.</span>
       </div>
       <div class="dash-cards">
@@ -4608,7 +4679,7 @@ let histPage = 1;
 const dashDataErrors = { items:false, stockBalances:false, stockByRacks:false };
 const dashLoaded = { items:false, stockBalances:false, todaysKpi:false };
 function updateDashErrorBanner() {
-  const banner = $('#dash-error-banner');
+  const banner = $('#main-content');
   if (!banner) return;
   const hasError = dashDataErrors.items || dashDataErrors.stockBalances || dashDataErrors.stockByRacks;
   banner.hidden = !hasError;
