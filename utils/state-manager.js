@@ -470,15 +470,20 @@ export class AppState {
    * 
    * @throws {Error} If transaction fails or item not found
    */
-  async updateStockBalance(itemId, delta, type, transactionId) {
+async updateStockBalance(itemId, delta, type, transactionId) {
     /** @type {import('firebase/firestore').DocumentReference */
     const balanceRef = doc(this.db, 'stockBalances', itemId);
     /** @type {import('firebase/firestore').DocumentSnapshot */
     const balanceSnap = await getDoc(balanceRef);
     /** @type {number} */
     const currentQty = balanceSnap.exists() ? (balanceSnap.data().qty || 0) : 0;
-    /** @type {number} */
-    const newQty = Math.max(0, currentQty + delta);
+
+    // VALIDASI: Cegah over-withdrawal (KELUAR qty > stok available)
+    // Jangan menggunakan Math.max(0, ...) yang menyembunyikan loss of quantity.
+    // Sebaliknya, lempar error jika transaksi melebihi stok yang ada.
+    if (type === 'KELUAR' && delta < 0 && Math.abs(delta) > currentQty) {
+      throw new Error('Stok tidak cukup untuk transaksi KELUAR. Stok tersedia: ' + currentQty + ', diminta: ' + Math.abs(delta));
+    }
 
     await runTransaction(this.db, async (tx) => {
       /** @type {import('firebase/firestore').DocumentSnapshot */
@@ -486,15 +491,18 @@ export class AppState {
       /** @type {number} */
       const oldQty = snap.exists() ? (snap.data().qty || 0) : 0;
       
-      // Update stock balance with new quantity and reference
+      // Hitung newQty tanpa clamping — akan divergen jika KELUAR melebihi stok,
+      // tapi error sudah dilempar di atas dan transaksi akan dibatalkan.
+      const newQty = type === 'MASUK' ? currentQty + delta : currentQty - delta;
+
+      // Update stock balance dengan audit trail
       tx.update(balanceRef, {
         qty: newQty,
         lastTransactionId: transactionId,
         updatedAt: serverTimestamp()
       });
 
-      // Create audit log entry for KELUAR transactions or negative deltas
-      // (only for KELUAR type or when manual adjustment needed)
+      // Buat audit log entry untuk KELUAR atau adjustment negatif
       if (type === 'KELUAR' || delta < 0) {
         /** @type {import('firebase/firestore').DocumentReference */
         const corrRef = doc(collection(this.db, 'stockCorrections'));
@@ -508,6 +516,8 @@ export class AppState {
           createdByName: this.currentUser?.name
         });
       }
+    });
+  }
     });
   }
 

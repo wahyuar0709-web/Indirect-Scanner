@@ -349,6 +349,12 @@ export function executeRecovery(options) {
   /** @type {string} */
   let reason = options && options.reason ? options.reason : null;
 
+  // AUTHORIZATION CHECK: Only ADMIN may execute controlled data recovery
+  if (!getAppState().isAdmin()) {
+    window.showToast('Akses ditolak — hanya Admin yang boleh perbaiki stok');
+    return;
+  }
+
   // If no reason provided, prompt user
   if (!reason) {
     reason = prompt('Masukkan alasan perbaikan stok (wajib, akan tercatat di audit log):');
