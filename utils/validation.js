@@ -130,8 +130,8 @@ export const validation = {
     if (payload.rowNumber !== undefined && (typeof payload.rowNumber !== 'number' || payload.rowNumber <= 0)) {
       errors.push('rowNumber harus number > 0 jika diisi');
     }
-    if (payload.rowNumber !== undefined && typeof payload.rowNumber === 'number' && payload.rowNumber !== Math.floor(payload.rowNumber)) {
-      warnings.push('rowNumber pecahan (mis. 1.5) tidak akan tereferensikan benar-benar di transaction row identity');
+if (payload.rowNumber !== undefined && typeof payload.rowNumber === 'number' && payload.rowNumber !== Math.floor(payload.rowNumber)) {
+      errors.push('rowNumber harus bilangan bulat (integer), pecahan tidak diizinkan');
     }
 
     // 5. Validate qty is integer for pattern matching
@@ -279,7 +279,7 @@ export const validation = {
     if (!vendor) {
       errors.push(`Vendor "${vendorCode.trim()}" tidak ditemukan`);
     } else if (vendor.status && vendor.status !== 'ACTIVE') {
-      warnings.push(`Vendor "${vendorCode.trim()}" status: ${vendor.status}`);
+      errors.push(`Vendor "${vendorCode.trim()}" status: ${vendor.status} — hanya vendor ACTIVE yang boleh digunakan`);
     }
 
     return { valid: errors.length === 0, errors };

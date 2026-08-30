@@ -312,7 +312,7 @@ export function runReconciliation() {
     el.innerHTML = html;
   } catch (err) {
     console.error('runReconciliation error:', err);
-    el.innerHTML = `<p style="font-size:12px;color:var(--danger);text-align:center;padding:10px 0;">Gagal memuat data: ${err.message || 'error'}</p>`;
+    el.innerHTML = `<p style="font-size:12px;color:var(--danger);text-align:center;padding:10px 0;">Gagal memuat data: ${utils.dom.escapeHTML(err.message || 'error')}</p>`;
   }
 }
 
@@ -445,7 +445,7 @@ export function executeRecovery(options) {
     if (window.runReconciliation) window.runReconciliation();
   } catch (err) {
     console.error('executeRecovery error:', err);
-    window.showToast(`Error: ${err.message || 'Terjadi kesalahan'}`);
+    window.showToast(classifyError(err));
   } finally {
     /** @type {HTMLElement} */
     const confirmBtn = document.getElementById('btn-recovery-confirm');
@@ -525,8 +525,55 @@ export function exportItemsCSV() {
     window.showToast('CSV berhasil diunduh');
   } catch (err) {
     console.error('exportItemsCSV error:', err);
-    window.showToast(`Error: ${err.message || 'Terjadi kesalahan'}`);
+    window.showToast(classifyError(err));
   }
+}
+
+/**
+ * Klasifikasi error Firebase/internal ke kategori pengguna yang baik.
+ * Mengembalikan pesan yang aman untuk ditampilkan UI.
+ */
+function classifyError(err: Error): string {
+  const msg = err.message || '';
+  const lower = msg.toLowerCase();
+
+  // Pattern: permission-denied | Missing or insufficient permissions
+  if (/permission.?denied|insufficient.?permission|missing.?permission/i.test(lower)) {
+    return 'Anda tidak memiliki izin untuk melakukan tindakan ini.';
+  }
+
+  // Pattern: cancelled | The operation was cancelled
+  if (/cancel/i.test(lower)) {
+    return 'Operasi dibatalkan.';
+  }
+
+  // Pattern: not-found | Missing or insufficient permissions (different phrasing)
+  if (/not.?found|item.?not.?exist|data.?not.?found/i.test(lower)) {
+    return 'Data yang diminta tidak ditemukan.';
+  }
+
+  // Pattern: network | off-line | offline
+  if (/network|off-line|offline|failed.?network/i.test(lower)) {
+    return 'Gagal terhubung ke server. Cek koneksi internet.';
+  }
+
+  // Pattern: conflicting | already exists | duplicate
+  if (/conflict|already.?exist|duplicate|already.?in.use/i.test(lower)) {
+    return 'Data sudah ada. Perubahan tidak diterapkan.';
+  }
+
+  // Pattern: quota | quota.?exceeded | limit.?exceeded
+  if (/quota|limit.?exceeded/i.test(lower)) {
+    return 'Kebatasan layanan tercapai.';
+  }
+
+  // Pattern: unauthorized | not- authenticated
+  if (/unauthorized|not.?authenticated|invalid.?credential/i.test(lower)) {
+    return 'Sesi pengguna tidak valid. Silakan refresh halaman.';
+  }
+
+  // Default: generic safe message
+  return 'Terjadi kesalahan yang tidak terduga. Coba lagi nanti.';
 }
 
 /**
