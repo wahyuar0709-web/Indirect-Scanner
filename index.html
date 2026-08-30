@@ -4964,20 +4964,42 @@ function checkTrxAnomaly() {
   if (!warnEl) return;
   const itemId = trxItemSel.value;
   const qty = Number($('#trx-qty').value);
-  if (!itemId || !qty || qty <= 0) { warnEl.hidden = true; return; }
+  const qtyInput = $('#trx-qty');
+  const itemSel = $('#trx-item');
+  let hasError = false;
+
+  if (!itemId || !qty || qty <= 0) {
+    warnEl.hidden = true;
+    qtyInput.classList.add('user-invalid');
+    hasError = true;
+  } else {
+    qtyInput.classList.remove('user-invalid');
+  }
 
   const sameItemTrx = histTransactions.filter(t => t.itemId === itemId && t.type === trxType);
-  if (sameItemTrx.length < 3) { warnEl.hidden = true; return; }
-
-  const avg = sameItemTrx.reduce((s, t) => s + (t.qty || 0), 0) / sameItemTrx.length;
-  const item = state.items[itemId];
-  const unit = item?.unit || '';
-
-  if (avg > 0 && qty > avg * 3 && (qty - avg) >= 5) {
-    warnEl.hidden = false;
-    warnEl.textContent = `⚠️ Qty (${qty}) jauh di atas rata-rata transaksi ${trxType} item ini (rata-rata ${Math.round(avg)} ${unit} dari ${sameItemTrx.length} transaksi terakhir). Cek kembali sebelum simpan.`;
-  } else {
+  if (sameItemTrx.length < 3) {
     warnEl.hidden = true;
+    if (!hasError) qtyInput.classList.remove('user-invalid');
+  } else {
+    const avg = sameItemTrx.reduce((s, t) => s + (t.qty || 0), 0) / sameItemTrx.length;
+    const item = state.items[itemId];
+    const unit = item?.unit || '';
+
+    if (avg > 0 && qty > avg * 3 && (qty - avg) >= 5) {
+      warnEl.hidden = false;
+      warnEl.textContent = `⚠️ Qty (${qty}) jauh di atas rata-rata transaksi ${trxType} item ini (rata-rata ${Math.round(avg)} ${unit} dari ${sameItemTrx.length} transaksi terakhir). Cek kembali sebelum simpan.`;
+      qtyInput.classList.add('user-invalid');
+      hasError = true;
+    } else {
+      warnEl.hidden = true;
+      if (!hasError) qtyInput.classList.remove('user-invalid');
+    }
+  }
+
+  // Provide success feedback when qty is valid
+  if (!hasError && itemId && qty > 0 && Number.isInteger(qty)) {
+    // Show brief success toast
+    toast(`Qty ${qty} ${unit} valid`, 'success', 1500);
   }
 }
 
