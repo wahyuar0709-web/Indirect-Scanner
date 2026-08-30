@@ -1,0 +1,22 @@
+{
+  "name": "rdi-indirect-inventory",
+  "version": "6.70.0",
+  "description": "RDI Indirect Inventory v6.70 - Warehouse Inventory Management",
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:debug": "vitest run --debug"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "firebase": "^10.13.0",
+    "firebase-admin": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/firebase": "^3.2023.5",
+    "vitest": "^2.0.5",
+    "jsdom": "^24.0.0"
+  }
+}
